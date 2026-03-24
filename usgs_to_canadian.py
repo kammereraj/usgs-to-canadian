@@ -18,6 +18,14 @@ parameter code, value, units, and approval status.  This script reads
 one or more of those JSON files and writes CSV files matching the
 Environment and Climate Change Canada (ECCC) hydrometric data format.
 
+Two modes of operation:
+
+  extract  -- Extract a single station/parameter from a
+              concatenated river file (multiple FeatureCollections
+              appended back-to-back).
+  convert  -- Convert one or more single-station USGS JSON files
+              (original behavior).
+
 The conversion performs the following transformations on each record:
 
   1. Station ID    -- strips the "USGS-" prefix
@@ -29,14 +37,12 @@ The conversion performs the following transformations on each record:
                         00060 (Discharge)    -> 47 (Debit)
                         00065 (Gage height)  -> 46 (Niveau d'eau)
                       Unmapped codes are passed through as-is.
-  4. Value         -- converts imperial to metric (by default):
-                        Discharge:   ft^3/s * 0.0283168466 = m^3/s
-                        Gage height: ft * 0.3048 = m
-                      Rounding is parameter-dependent: discharge
-                      values are rounded to whole numbers (0 dp) to
-                      match ECCC convention, while water-level values
-                      use 3 decimal places.  Unmapped parameters
-                      default to 3 dp.
+  4. Value         -- converts to metric (by default):
+                        00060: ft^3/s * 0.0283168466 = m^3/s
+                        00065: ft * 0.3048 = m
+                        00011: (F - 32) * 5/9 = C
+                      Parameters already in metric (00010, 00095,
+                      00300) pass through unchanged.
   5. Approval      -- maps to bilingual format:
                         "Provisional" -> "Provisional/Provisoire"
                         "Approved"    -> "Approved/Approuve"
@@ -52,49 +58,39 @@ Output CSV columns (matching ECCC standard):
   Qualifier/Qualificatif, Symbol/Symbole, Approval/Approbation,
   Grade/Classification, Qualifiers/Qualificatifs
 
-Arguments
----------
-  input              One or more USGS JSON files to convert
-                     (positional, required).
+Subcommands
+-----------
+  extract STATION_ID PARAMETER_CODE INPUT OUTPUT [--no-convert]
+      Extract one station/parameter from a concatenated
+      river file and write to a CSV file.
 
-Options
--------
-  -o, --output PATH  Output destination.
-                       - Single file mode (one input): treated as the
-                         output file path.
-                       - Batch mode (multiple inputs): treated as the
-                         output directory.  The directory is created
-                         if it does not exist.  Each output file is
-                         auto-named as <station_id>_hydrometric.csv.
-                       - If omitted: output is written to the current
-                         directory as <station_id>_hydrometric.csv.
+  convert INPUT [INPUT...] [-o OUTPUT] [--no-convert]
+      Convert one or more single-station USGS JSON files
+      (original behavior).
 
-  --no-convert       Skip unit conversion.  Values are kept in
-                     original USGS imperial units (ft^3/s for
-                     discharge, ft for gage height).  Parameter codes
-                     are still mapped to Canadian codes.  Useful when
-                     downstream processing handles its own unit
-                     conversion.
+  (legacy) INPUT [INPUT...] [-o OUTPUT] [--no-convert]
+      If no subcommand is given, falls back to 'convert' mode.
 
-  -h, --help         Show the argparse help message and exit.
+Supported parameter codes
+-------------------------
+  00010  Water temperature (degrees C) -- pass-through
+  00011  Water temperature (degrees F) -- converted to C
+  00060  Discharge (ft^3/s)            -- converted to m^3/s
+  00065  Gage height (ft)              -- converted to m
+  00095  Specific conductance (uS/cm)  -- pass-through
+  00300  Dissolved oxygen              -- pass-through
 
 Examples
 --------
-  # Convert a single file, auto-name output
-  # (writes 14105700_hydrometric.csv):
-  python usgs_to_canadian.py 14105700.json
+  # Extract from a concatenated river file:
+  python usgs_to_canadian.py extract 01046500 00065 \\
+      usgs_river.1600 01046500_00065.csv
 
-  # Convert a single file to a specific output path:
-  python usgs_to_canadian.py 14105700.json -o columbia_river.csv
+  # Convert a single file, auto-name output:
+  python usgs_to_canadian.py convert 14105700.json
 
-  # Batch-convert all JSON files in a directory:
-  python usgs_to_canadian.py data/*.json -o converted/
-
-  # Convert without unit conversion (keep ft^3/s, ft):
-  python usgs_to_canadian.py 14105700.json --no-convert
-
-  # Combine flags:
-  python usgs_to_canadian.py data/*.json -o converted/ --no-convert
+  # Legacy mode (no subcommand, same as convert):
+  python usgs_to_canadian.py 14105700.json -o out.csv
 """
 
 import argparse
@@ -121,8 +117,12 @@ UNIT_CONVERSIONS: Dict[str, float] = {
 # ECCC uses whole numbers for discharge (m^3/s) and 3 decimal places
 # for water level (m).  Unmapped parameters default to 3 dp.
 ROUNDING_PRECISION: Dict[str, int] = {
-    "00060": 0,
-    "00065": 3,
+    "00010": 1,   # Water temperature (C)
+    "00011": 1,   # Water temperature (F -> C)
+    "00060": 0,   # Discharge (m^3/s)
+    "00065": 3,   # Gage height (m)
+    "00095": 0,   # Specific conductance (uS/cm)
+    "00300": 1,   # Dissolved oxygen
 }
 
 # USGS approval -> Canadian bilingual approval
@@ -180,6 +180,106 @@ def parse_usgs_json(filepath: str) -> List[Dict[str, Any]]:
     return data.get("features", [])
 
 
+def parse_concatenated_geojson(
+    filepath: str,
+) -> List[Dict[str, Any]]:
+    """Parse a file containing concatenated GeoJSON
+    FeatureCollections.
+
+    Production river files concatenate multiple
+    FeatureCollection JSON objects back-to-back with no
+    delimiter.  Uses ``json.JSONDecoder.raw_decode`` to iterate
+    through all objects and collect their features.
+
+    Returns a flat list of all Feature dicts across all
+    FeatureCollections in the file.
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    decoder = json.JSONDecoder()
+    all_features: List[Dict[str, Any]] = []
+    idx = 0
+    length = len(text)
+
+    while idx < length:
+        # Skip whitespace between JSON objects
+        while idx < length and text[idx] in " \t\n\r":
+            idx += 1
+        if idx >= length:
+            break
+
+        try:
+            obj, end_idx = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Failed to parse JSON at position {idx} "
+                f"in {filepath}: {exc}"
+            ) from exc
+
+        if obj.get("type") != "FeatureCollection":
+            raise ValueError(
+                f"Expected FeatureCollection at position "
+                f"{idx}, got: {obj.get('type')}"
+            )
+
+        all_features.extend(obj.get("features", []))
+        idx = end_idx
+
+    return all_features
+
+
+def filter_features(
+    features: List[Dict[str, Any]],
+    station_id: str,
+    parameter_code: str,
+) -> List[Dict[str, Any]]:
+    """Filter features by station ID and parameter code.
+
+    *station_id* should be the bare numeric ID (no ``USGS-``
+    prefix).  Comparison strips the prefix from each feature's
+    ``monitoring_location_id`` via ``_sanitize_station_id``.
+    """
+    result = []
+    for feat in features:
+        props = feat.get("properties", {})
+        raw_sid = props.get(
+            "monitoring_location_id", ""
+        )
+        feat_sid = _sanitize_station_id(raw_sid)
+        feat_param = props.get("parameter_code", "")
+        if (feat_sid == station_id
+                and feat_param == parameter_code):
+            result.append(feat)
+    return result
+
+
+def _convert_value(
+    usgs_param: str,
+    raw_value: float,
+    convert_units: bool,
+) -> Any:
+    """Convert a raw USGS value to the target unit system.
+
+    Handles multiplicative conversions (00060, 00065) via
+    ``UNIT_CONVERSIONS``, affine conversion for 00011 (F -> C),
+    and pass-through for all other parameters.  Rounds according
+    to ``ROUNDING_PRECISION``.
+    """
+    value: Any = raw_value
+    if convert_units:
+        if usgs_param == "00011":
+            # Fahrenheit -> Celsius
+            value = (value - 32.0) * 5.0 / 9.0
+        elif usgs_param in UNIT_CONVERSIONS:
+            value = value * UNIT_CONVERSIONS[usgs_param]
+    precision = ROUNDING_PRECISION.get(usgs_param, 3)
+    value = round(value, precision)
+    if precision == 0:
+        value = int(value)
+    return value
+
+
 def convert_timestamp(iso_str: str) -> str:
     """Convert ISO 8601 timestamp to UTC 'Z' format."""
     try:
@@ -229,14 +329,9 @@ def convert_feature(
     # Value with optional unit conversion
     raw_value = props.get("value")
     if raw_value is not None:
-        value: Any = float(raw_value)
-        if convert_units and usgs_param in UNIT_CONVERSIONS:
-            value = value * UNIT_CONVERSIONS[usgs_param]
-        precision = ROUNDING_PRECISION.get(usgs_param, 3)
-        value = round(value, precision)
-        # Convert to int when precision is 0 for clean output
-        if precision == 0:
-            value = int(value)
+        value = _convert_value(
+            usgs_param, float(raw_value), convert_units
+        )
     else:
         value = ""
 
@@ -319,8 +414,81 @@ def convert_file(
     return output_path
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Entry point for CLI invocation."""
+def _cmd_extract(args: argparse.Namespace) -> None:
+    """Handle the 'extract' subcommand."""
+    convert_units = not args.no_convert
+    all_features = parse_concatenated_geojson(args.input)
+    matched = filter_features(
+        all_features, args.station_id, args.parameter_code
+    )
+    if not matched:
+        print(
+            f"Warning: no features found for station "
+            f"{args.station_id} parameter "
+            f"{args.parameter_code}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    result = convert_file(
+        input_path=args.input,
+        output_path=args.output,
+        convert_units=convert_units,
+        features=matched,
+    )
+    if result:
+        print(f"Wrote {result}")
+
+
+def _cmd_convert(args: argparse.Namespace) -> None:
+    """Handle the 'convert' subcommand (original behavior)."""
+    convert_units = not args.no_convert
+
+    if len(args.input) == 1:
+        result = convert_file(
+            args.input[0], args.output_path, convert_units
+        )
+        if result:
+            print(f"Wrote {result}")
+    else:
+        out_dir = args.output_path or "."
+        if args.output_path and not os.path.isdir(out_dir):
+            os.makedirs(out_dir, exist_ok=True)
+
+        for input_path in args.input:
+            features = parse_usgs_json(input_path)
+            if not features:
+                print(
+                    f"Skipping {input_path}: no features",
+                    file=sys.stderr,
+                )
+                continue
+
+            first_props = features[0].get(
+                "properties", {}
+            )
+            raw_sid = first_props.get(
+                "monitoring_location_id", "unknown"
+            )
+            station_id = _sanitize_station_id(raw_sid)
+
+            out_path = os.path.join(
+                out_dir,
+                f"{station_id}_hydrometric.csv",
+            )
+
+            result = convert_file(
+                input_path=input_path,
+                output_path=out_path,
+                convert_units=convert_units,
+                features=features,
+            )
+            if result:
+                print(f"Wrote {result}")
+
+
+def _build_legacy_parser() -> argparse.ArgumentParser:
+    """Build the original (pre-subcommand) argument parser."""
     parser = argparse.ArgumentParser(
         description=(
             "Convert USGS Water Data API JSON to "
@@ -335,6 +503,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument(
         "-o", "--output",
         default=None,
+        dest="output_path",
         help=(
             "Output CSV file path, or directory for "
             "batch mode."
@@ -348,56 +517,98 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "imperial units)."
         ),
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    convert_units = not args.no_convert
 
-    if len(args.input) == 1:
-        # Single file mode
-        result = convert_file(
-            args.input[0], args.output, convert_units
-        )
-        if result:
-            print(f"Wrote {result}")
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Entry point for CLI invocation."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert USGS Water Data API JSON to "
+            "Canadian hydrometric CSV format."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- extract subcommand ---
+    extract_p = subparsers.add_parser(
+        "extract",
+        help=(
+            "Extract one station/parameter from a "
+            "concatenated river file."
+        ),
+    )
+    extract_p.add_argument(
+        "station_id",
+        help=(
+            "Station ID (e.g. 01046500, without "
+            "USGS- prefix)."
+        ),
+    )
+    extract_p.add_argument(
+        "parameter_code",
+        help="USGS parameter code (e.g. 00065).",
+    )
+    extract_p.add_argument(
+        "input",
+        help="Path to concatenated river file.",
+    )
+    extract_p.add_argument(
+        "output",
+        help="Output CSV file path.",
+    )
+    extract_p.add_argument(
+        "--no-convert",
+        action="store_true",
+        help="Skip unit conversion.",
+    )
+
+    # --- convert subcommand ---
+    convert_p = subparsers.add_parser(
+        "convert",
+        help=(
+            "Convert single-station USGS JSON files "
+            "(original behavior)."
+        ),
+    )
+    convert_p.add_argument(
+        "input",
+        nargs="+",
+        help="One or more USGS JSON files to convert.",
+    )
+    convert_p.add_argument(
+        "-o", "--output",
+        default=None,
+        dest="output_path",
+        help=(
+            "Output CSV file path, or directory for "
+            "batch mode."
+        ),
+    )
+    convert_p.add_argument(
+        "--no-convert",
+        action="store_true",
+        help="Skip unit conversion.",
+    )
+
+    # Determine effective argv
+    effective = argv if argv is not None else sys.argv[1:]
+
+    # Route to subcommand, help, or legacy fallback
+    if effective and effective[0] in ("extract", "convert"):
+        args = parser.parse_args(effective)
+        if args.command == "extract":
+            _cmd_extract(args)
+        else:
+            _cmd_convert(args)
+    elif not effective or effective[0] in ("-h", "--help"):
+        # Show main help with subcommands listed
+        parser.parse_args(effective)
     else:
-        # Batch mode
-        out_dir = args.output or "."
-        if args.output and not os.path.isdir(out_dir):
-            os.makedirs(out_dir, exist_ok=True)
-
-        for input_path in args.input:
-            features = parse_usgs_json(input_path)
-            if not features:
-                print(
-                    f"Skipping {input_path}: no features",
-                    file=sys.stderr,
-                )
-                continue
-
-            # Extract station ID from first feature
-            first_props = features[0].get(
-                "properties", {}
-            )
-            raw_sid = first_props.get(
-                "monitoring_location_id", "unknown"
-            )
-            station_id = _sanitize_station_id(raw_sid)
-
-            out_path = os.path.join(
-                out_dir,
-                f"{station_id}_hydrometric.csv",
-            )
-
-            # Pass pre-parsed features to avoid
-            # double-reading
-            result = convert_file(
-                input_path=input_path,
-                output_path=out_path,
-                convert_units=convert_units,
-                features=features,
-            )
-            if result:
-                print(f"Wrote {result}")
+        # Legacy fallback: first arg is a file path
+        legacy_parser = _build_legacy_parser()
+        legacy_args = legacy_parser.parse_args(effective)
+        _cmd_convert(legacy_args)
 
 
 if __name__ == "__main__":

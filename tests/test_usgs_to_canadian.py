@@ -14,9 +14,13 @@ import pytest
 from usgs_to_canadian import (
     CSV_HEADER,
     UNIT_CONVERSIONS,
+    _convert_value,
     convert_feature,
     convert_file,
     convert_timestamp,
+    filter_features,
+    main,
+    parse_concatenated_geojson,
     parse_usgs_json,
 )
 
@@ -653,3 +657,383 @@ class TestRealFile:
             }
 
         assert input_times == output_times
+
+
+# -------------------------------------------------------------------
+# Concatenated GeoJSON helpers
+# -------------------------------------------------------------------
+
+def _make_feature(
+    station_id: str = "USGS-01046500",
+    param_code: str = "00065",
+    value: str = "8.10",
+    time: str = "2026-03-21T12:30:00+00:00",
+) -> dict:
+    """Build a single Feature for testing."""
+    return {
+        "type": "Feature",
+        "id": "test-id",
+        "geometry": None,
+        "properties": {
+            "id": "test-id",
+            "time_series_id": "ts001",
+            "monitoring_location_id": station_id,
+            "parameter_code": param_code,
+            "statistic_id": "00011",
+            "time": time,
+            "value": value,
+            "unit_of_measure": "ft",
+            "approval_status": "Provisional",
+            "qualifier": None,
+            "last_modified": (
+                "2026-03-21T13:28:18.526172+00:00"
+            ),
+        },
+    }
+
+
+def _write_concatenated(
+    tmp_path: Path, collections: list
+) -> str:
+    """Write concatenated FeatureCollections to a file."""
+    path = tmp_path / "river.json"
+    text = "".join(
+        json.dumps(c) for c in collections
+    )
+    path.write_text(text)
+    return str(path)
+
+
+# -------------------------------------------------------------------
+# parse_concatenated_geojson
+# -------------------------------------------------------------------
+
+class TestParseConcatenatedGeojson:
+    def test_single_collection(
+        self, tmp_path: Path
+    ) -> None:
+        feat = _make_feature()
+        fc = _make_geojson([feat])
+        path = _write_concatenated(tmp_path, [fc])
+        result = parse_concatenated_geojson(path)
+        assert len(result) == 1
+
+    def test_two_collections_no_delimiter(
+        self, tmp_path: Path
+    ) -> None:
+        fc1 = _make_geojson([_make_feature()])
+        fc2 = _make_geojson([
+            _make_feature(station_id="USGS-99999999"),
+        ])
+        path = _write_concatenated(tmp_path, [fc1, fc2])
+        result = parse_concatenated_geojson(path)
+        assert len(result) == 2
+
+    def test_collections_with_newlines(
+        self, tmp_path: Path
+    ) -> None:
+        fc1 = _make_geojson([_make_feature()])
+        fc2 = _make_geojson([_make_feature()])
+        path = tmp_path / "river.json"
+        text = json.dumps(fc1) + "\n" + json.dumps(fc2)
+        path.write_text(text)
+        result = parse_concatenated_geojson(str(path))
+        assert len(result) == 2
+
+    def test_mixed_empty_and_nonempty(
+        self, tmp_path: Path
+    ) -> None:
+        fc_empty = _make_geojson([])
+        fc_data = _make_geojson([
+            _make_feature(), _make_feature(),
+        ])
+        path = _write_concatenated(
+            tmp_path, [fc_empty, fc_data, fc_empty]
+        )
+        result = parse_concatenated_geojson(path)
+        assert len(result) == 2
+
+    def test_all_empty_collections(
+        self, tmp_path: Path
+    ) -> None:
+        fcs = [_make_geojson([]) for _ in range(5)]
+        path = _write_concatenated(tmp_path, fcs)
+        result = parse_concatenated_geojson(path)
+        assert result == []
+
+    def test_invalid_json_raises(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "bad.json"
+        path.write_text(
+            '{"type":"FeatureCollection"}{BAD'
+        )
+        with pytest.raises(ValueError, match="Failed"):
+            parse_concatenated_geojson(str(path))
+
+    def test_non_featurecollection_raises(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps({"type": "Feature"}))
+        with pytest.raises(
+            ValueError, match="FeatureCollection"
+        ):
+            parse_concatenated_geojson(str(path))
+
+    def test_empty_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "empty.json"
+        path.write_text("")
+        result = parse_concatenated_geojson(str(path))
+        assert result == []
+
+
+# -------------------------------------------------------------------
+# filter_features
+# -------------------------------------------------------------------
+
+class TestFilterFeatures:
+    def test_matching_station_and_param(self) -> None:
+        feats = [
+            _make_feature("USGS-01046500", "00065"),
+            _make_feature("USGS-01046500", "00060"),
+            _make_feature("USGS-99999999", "00065"),
+        ]
+        result = filter_features(
+            feats, "01046500", "00065"
+        )
+        assert len(result) == 1
+        props = result[0]["properties"]
+        assert props["parameter_code"] == "00065"
+
+    def test_no_matches(self) -> None:
+        feats = [
+            _make_feature("USGS-01046500", "00065"),
+        ]
+        result = filter_features(
+            feats, "99999999", "00060"
+        )
+        assert result == []
+
+    def test_station_match_param_mismatch(self) -> None:
+        feats = [
+            _make_feature("USGS-01046500", "00065"),
+        ]
+        result = filter_features(
+            feats, "01046500", "00060"
+        )
+        assert result == []
+
+    def test_multiple_timesteps_returned(self) -> None:
+        feats = [
+            _make_feature(
+                "USGS-01046500", "00065",
+                time="2026-03-21T12:30:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00065",
+                time="2026-03-21T12:45:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00060",
+                time="2026-03-21T12:30:00+00:00",
+            ),
+        ]
+        result = filter_features(
+            feats, "01046500", "00065"
+        )
+        assert len(result) == 2
+
+    def test_usgs_prefix_stripped(self) -> None:
+        """Bare ID matches features with USGS- prefix."""
+        feats = [
+            _make_feature("USGS-01046500", "00065"),
+        ]
+        result = filter_features(
+            feats, "01046500", "00065"
+        )
+        assert len(result) == 1
+
+
+# -------------------------------------------------------------------
+# New parameter conversions
+# -------------------------------------------------------------------
+
+class TestNewParameterConversions:
+    def test_00011_fahrenheit_to_celsius_boiling(
+        self,
+    ) -> None:
+        val = _convert_value("00011", 212.0, True)
+        assert val == 100.0
+
+    def test_00011_fahrenheit_to_celsius_freezing(
+        self,
+    ) -> None:
+        val = _convert_value("00011", 32.0, True)
+        assert val == 0.0
+
+    def test_00011_fahrenheit_to_celsius_room(
+        self,
+    ) -> None:
+        # (72 - 32) * 5/9 = 22.222...  rounded to 1dp
+        val = _convert_value("00011", 72.0, True)
+        assert val == 22.2
+
+    def test_00011_no_convert_keeps_fahrenheit(
+        self,
+    ) -> None:
+        val = _convert_value("00011", 72.0, False)
+        assert val == 72.0
+
+    def test_00010_celsius_passthrough(self) -> None:
+        val = _convert_value("00010", 15.3, True)
+        assert val == 15.3
+
+    def test_00095_conductance_passthrough(self) -> None:
+        val = _convert_value("00095", 450.0, True)
+        assert val == 450
+
+    def test_00300_dissolved_oxygen_passthrough(
+        self,
+    ) -> None:
+        val = _convert_value("00300", 8.7, True)
+        assert val == 8.7
+
+    def test_rounding_00010(self) -> None:
+        # 1 decimal place
+        val = _convert_value("00010", 15.678, True)
+        assert val == 15.7
+
+    def test_rounding_00095(self) -> None:
+        # 0 decimal places -> int
+        val = _convert_value("00095", 450.7, True)
+        assert val == 451
+        assert isinstance(val, int)
+
+    def test_rounding_00300(self) -> None:
+        # 1 decimal place
+        val = _convert_value("00300", 8.756, True)
+        assert val == 8.8
+
+    def test_convert_feature_00011(self) -> None:
+        """Full convert_feature with F->C."""
+        props = {
+            **SAMPLE_FEATURE["properties"],
+            "parameter_code": "00011",
+            "value": "72",
+            "unit_of_measure": "deg F",
+        }
+        row = convert_feature(props, convert_units=True)
+        assert row["Value/Valeur"] == 22.2
+        # Unmapped param code passes through
+        assert row["Parameter/Paramètre"] == "00011"
+
+
+# -------------------------------------------------------------------
+# Extract end-to-end
+# -------------------------------------------------------------------
+
+class TestExtractEndToEnd:
+    def test_extract_produces_csv(
+        self, tmp_path: Path
+    ) -> None:
+        fc1 = _make_geojson([])
+        fc2 = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "8.10",
+                "2026-03-21T12:30:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00065", "8.09",
+                "2026-03-21T12:45:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00060", "500",
+                "2026-03-21T12:30:00+00:00",
+            ),
+        ])
+        fc3 = _make_geojson([
+            _make_feature(
+                "USGS-99999999", "00065", "3.50",
+                "2026-03-21T12:30:00+00:00",
+            ),
+        ])
+        infile = _write_concatenated(
+            tmp_path, [fc1, fc2, fc3]
+        )
+        outfile = str(tmp_path / "out.csv")
+
+        main([
+            "extract", "01046500", "00065",
+            infile, outfile,
+        ])
+
+        with open(outfile) as f:
+            reader = csv.DictReader(f)
+            assert reader.fieldnames == CSV_HEADER
+            rows = list(reader)
+
+        assert len(rows) == 2
+        assert rows[0]["ID"] == "01046500"
+        assert rows[0]["Parameter/Paramètre"] == "46"
+
+    def test_extract_no_match_exits(
+        self, tmp_path: Path
+    ) -> None:
+        fc = _make_geojson([
+            _make_feature("USGS-01046500", "00065"),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        outfile = str(tmp_path / "out.csv")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "extract", "99999999", "00060",
+                infile, outfile,
+            ])
+        assert exc_info.value.code == 1
+
+    def test_extract_no_convert(
+        self, tmp_path: Path
+    ) -> None:
+        fc = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "10.0",
+            ),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        outfile = str(tmp_path / "out.csv")
+
+        main([
+            "extract", "01046500", "00065",
+            infile, outfile, "--no-convert",
+        ])
+
+        with open(outfile) as f:
+            rows = list(csv.DictReader(f))
+        # Value kept in feet (10.0), not converted
+        assert float(rows[0]["Value/Valeur"]) == 10.0
+
+
+# -------------------------------------------------------------------
+# CLI subcommands
+# -------------------------------------------------------------------
+
+class TestCliSubcommands:
+    def test_convert_subcommand(
+        self,
+        single_feature_json: str,
+        tmp_path: Path,
+    ) -> None:
+        out = str(tmp_path / "out.csv")
+        main(["convert", single_feature_json, "-o", out])
+        assert os.path.exists(out)
+
+    def test_legacy_fallback(
+        self,
+        single_feature_json: str,
+        tmp_path: Path,
+    ) -> None:
+        out = str(tmp_path / "out.csv")
+        main([single_feature_json, "-o", out])
+        assert os.path.exists(out)
