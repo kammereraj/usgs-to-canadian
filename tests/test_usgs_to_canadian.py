@@ -854,6 +854,32 @@ class TestFilterFeatures:
         )
         assert len(result) == 1
 
+    def test_no_param_returns_all_for_station(
+        self,
+    ) -> None:
+        """Omitting parameter_code returns all params."""
+        feats = [
+            _make_feature("USGS-01046500", "00065"),
+            _make_feature("USGS-01046500", "00060"),
+            _make_feature("USGS-01046500", "00010"),
+            _make_feature("USGS-99999999", "00065"),
+        ]
+        result = filter_features(feats, "01046500")
+        assert len(result) == 3
+        params = {
+            f["properties"]["parameter_code"]
+            for f in result
+        }
+        assert params == {"00065", "00060", "00010"}
+
+    def test_no_param_no_match(self) -> None:
+        """Omitting parameter_code still filters by station."""
+        feats = [
+            _make_feature("USGS-01046500", "00065"),
+        ]
+        result = filter_features(feats, "99999999")
+        assert result == []
+
 
 # -------------------------------------------------------------------
 # New parameter conversions
@@ -989,6 +1015,66 @@ class TestExtractEndToEnd:
         with pytest.raises(SystemExit) as exc_info:
             main([
                 "extract", "99999999", "00060",
+                infile, outfile,
+            ])
+        assert exc_info.value.code == 1
+
+    def test_extract_all_parameters(
+        self, tmp_path: Path
+    ) -> None:
+        """Omitting parameter_code extracts all params."""
+        fc = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "8.10",
+                "2026-03-21T12:30:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00060", "500",
+                "2026-03-21T12:30:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00010", "15.5",
+                "2026-03-21T12:45:00+00:00",
+            ),
+            _make_feature(
+                "USGS-99999999", "00065", "3.50",
+                "2026-03-21T12:30:00+00:00",
+            ),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        outfile = str(tmp_path / "out.csv")
+
+        main([
+            "extract", "01046500",
+            infile, outfile,
+        ])
+
+        with open(outfile) as f:
+            reader = csv.DictReader(f)
+            assert reader.fieldnames == CSV_HEADER
+            rows = list(reader)
+
+        # 3 rows for station 01046500, excludes 99999999
+        assert len(rows) == 3
+        params = {r["Parameter/Paramètre"] for r in rows}
+        assert params == {"46", "47", "00010"}
+        assert all(
+            r["ID"] == "01046500" for r in rows
+        )
+
+    def test_extract_all_params_no_match(
+        self, tmp_path: Path
+    ) -> None:
+        """Omitting parameter_code still exits 1 on no match."""
+        fc = _make_geojson([
+            _make_feature("USGS-01046500", "00065"),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        outfile = str(tmp_path / "out.csv")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "extract", "99999999",
                 infile, outfile,
             ])
         assert exc_info.value.code == 1

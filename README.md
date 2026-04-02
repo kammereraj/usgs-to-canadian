@@ -15,8 +15,9 @@ matching the Environment and Climate Change Canada (ECCC) hydrometric data forma
 
 Two modes of operation:
 
-- **`extract`** — Extract a single station/parameter from a concatenated
-  river file (multiple FeatureCollections appended back-to-back).
+- **`extract`** — Extract a single station from a concatenated river file
+  (multiple FeatureCollections appended back-to-back). Optionally filter to a
+  single parameter code, or extract all parameters into one file.
 - **`convert`** — Convert one or more single-station USGS JSON files (original
   behavior).
 
@@ -60,17 +61,18 @@ Output CSV columns (matching ECCC standard):
 
 ### `extract` — concatenated river files
 
-Extract a single station and parameter from a production river file
-(concatenated GeoJSON FeatureCollections).
+Extract a single station from a production river file (concatenated GeoJSON
+FeatureCollections). When `PARAMETER_CODE` is provided, only that parameter is
+extracted. When omitted, all parameters for the station are written to one file.
 
 ```
-python usgs_to_canadian.py extract STATION_ID PARAMETER_CODE INPUT OUTPUT [--no-convert]
+python usgs_to_canadian.py extract STATION_ID [PARAMETER_CODE] INPUT OUTPUT [--no-convert]
 ```
 
 | Argument | Description |
 |---|---|
 | `STATION_ID` | Station ID without USGS- prefix (e.g. `01046500`). |
-| `PARAMETER_CODE` | USGS parameter code (e.g. `00065`). |
+| `PARAMETER_CODE` | USGS parameter code (e.g. `00065`). Optional — if omitted, all parameters for the station are included. |
 | `INPUT` | Path to river file (e.g. `usgs_river.1600`). |
 | `OUTPUT` | Output CSV file path. |
 | `--no-convert` | Skip unit conversion. |
@@ -100,9 +102,13 @@ python usgs_to_canadian.py INPUT [INPUT...] [-o OUTPUT] [--no-convert]
 ## Examples
 
 ```bash
-# Extract from a river file:
+# Extract one parameter from a river file:
 python usgs_to_canadian.py extract 01046500 00065 \
     usgs_river.1600 01046500_00065.csv
+
+# Extract all parameters for a station into one file:
+python usgs_to_canadian.py extract 01046500 \
+    usgs_river.1600 01046500_all.csv
 
 # Extract temperature (F->C conversion):
 python usgs_to_canadian.py extract 01046500 00011 \

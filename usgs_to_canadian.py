@@ -20,9 +20,11 @@ Environment and Climate Change Canada (ECCC) hydrometric data format.
 
 Two modes of operation:
 
-  extract  -- Extract a single station/parameter from a
-              concatenated river file (multiple FeatureCollections
-              appended back-to-back).
+  extract  -- Extract a single station from a concatenated river
+              file (multiple FeatureCollections appended
+              back-to-back).  Optionally filter to a single
+              parameter code, or extract all parameters into
+              one file.
   convert  -- Convert one or more single-station USGS JSON files
               (original behavior).
 
@@ -60,9 +62,10 @@ Output CSV columns (matching ECCC standard):
 
 Subcommands
 -----------
-  extract STATION_ID PARAMETER_CODE INPUT OUTPUT [--no-convert]
-      Extract one station/parameter from a concatenated
-      river file and write to a CSV file.
+  extract STATION_ID [PARAMETER_CODE] INPUT OUTPUT [--no-convert]
+      Extract one station from a concatenated river file and
+      write to a CSV file.  If PARAMETER_CODE is omitted, all
+      parameters for the station are included in one file.
 
   convert INPUT [INPUT...] [-o OUTPUT] [--no-convert]
       Convert one or more single-station USGS JSON files
@@ -82,9 +85,13 @@ Supported parameter codes
 
 Examples
 --------
-  # Extract from a concatenated river file:
+  # Extract one parameter from a concatenated river file:
   python usgs_to_canadian.py extract 01046500 00065 \\
       usgs_river.1600 01046500_00065.csv
+
+  # Extract all parameters for a station into one file:
+  python usgs_to_canadian.py extract 01046500 \\
+      usgs_river.1600 01046500_all.csv
 
   # Convert a single file, auto-name output:
   python usgs_to_canadian.py convert 14105700.json
@@ -232,13 +239,16 @@ def parse_concatenated_geojson(
 def filter_features(
     features: List[Dict[str, Any]],
     station_id: str,
-    parameter_code: str,
+    parameter_code: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Filter features by station ID and parameter code.
+    """Filter features by station ID and optionally parameter code.
 
     *station_id* should be the bare numeric ID (no ``USGS-``
     prefix).  Comparison strips the prefix from each feature's
     ``monitoring_location_id`` via ``_sanitize_station_id``.
+
+    If *parameter_code* is ``None``, all parameters for the
+    station are returned.
     """
     result = []
     for feat in features:
@@ -247,10 +257,13 @@ def filter_features(
             "monitoring_location_id", ""
         )
         feat_sid = _sanitize_station_id(raw_sid)
-        feat_param = props.get("parameter_code", "")
-        if (feat_sid == station_id
-                and feat_param == parameter_code):
-            result.append(feat)
+        if feat_sid != station_id:
+            continue
+        if (parameter_code is not None
+                and props.get("parameter_code", "")
+                != parameter_code):
+            continue
+        result.append(feat)
     return result
 
 
@@ -417,15 +430,21 @@ def convert_file(
 def _cmd_extract(args: argparse.Namespace) -> None:
     """Handle the 'extract' subcommand."""
     convert_units = not args.no_convert
+    param = args.parameter_code  # may be None
     all_features = parse_concatenated_geojson(args.input)
     matched = filter_features(
-        all_features, args.station_id, args.parameter_code
+        all_features, args.station_id, param
     )
     if not matched:
+        if param:
+            label = (
+                f"station {args.station_id} parameter "
+                f"{param}"
+            )
+        else:
+            label = f"station {args.station_id}"
         print(
-            f"Warning: no features found for station "
-            f"{args.station_id} parameter "
-            f"{args.parameter_code}",
+            f"Warning: no features found for {label}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -534,8 +553,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     extract_p = subparsers.add_parser(
         "extract",
         help=(
-            "Extract one station/parameter from a "
-            "concatenated river file."
+            "Extract one station (all or one parameter) "
+            "from a concatenated river file."
         ),
     )
     extract_p.add_argument(
@@ -547,7 +566,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     extract_p.add_argument(
         "parameter_code",
-        help="USGS parameter code (e.g. 00065).",
+        nargs="?",
+        default=None,
+        help=(
+            "USGS parameter code (e.g. 00065). If omitted, "
+            "all parameters for the station are extracted."
+        ),
     )
     extract_p.add_argument(
         "input",
