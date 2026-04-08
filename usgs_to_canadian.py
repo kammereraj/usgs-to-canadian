@@ -63,10 +63,13 @@ Output CSV columns (matching ECCC standard):
 
 Subcommands
 -----------
-  extract STATION_ID [PARAMETER_CODE] INPUT OUTPUT [--no-convert]
+  extract STATION_ID INPUT OUTPUT [--no-convert]
+  extract STATION_ID PARAMETER_CODE INPUT OUTPUT [--no-convert]
       Extract one station from a concatenated river file and
-      write to a CSV file.  If PARAMETER_CODE is omitted, all
-      parameters for the station are included in one file.
+      write to a CSV file.  With two positional arguments after
+      STATION_ID (INPUT and OUTPUT), all parameters for the
+      station are included.  With three (PARAMETER_CODE, INPUT,
+      OUTPUT), only that parameter is extracted.
 
   split INPUT [-o OUTPUT_DIR] [--no-convert]
       Split a concatenated river file into one CSV per
@@ -93,13 +96,13 @@ Supported parameter codes
 
 Examples
 --------
+  # Extract all parameters for a station into one file:
+  python usgs_to_canadian.py extract 02051500 \\
+      usgs_river.2026040614 02051500_hydrometric.csv
+
   # Extract one parameter from a concatenated river file:
   python usgs_to_canadian.py extract 01046500 00065 \\
       usgs_river.1600 01046500_00065.csv
-
-  # Extract all parameters for a station into one file:
-  python usgs_to_canadian.py extract 01046500 \\
-      usgs_river.1600 01046500_all.csv
 
   # Split a river file into one CSV per station:
   python usgs_to_canadian.py split usgs_river.1600 -o output/

@@ -63,18 +63,21 @@ Output CSV columns (matching ECCC standard):
 ### `extract` — concatenated river files
 
 Extract a single station from a production river file (concatenated GeoJSON
-FeatureCollections). When `PARAMETER_CODE` is provided, only that parameter is
-extracted. When omitted, all parameters for the station are written to one file.
+FeatureCollections). Two forms:
 
 ```
-python usgs_to_canadian.py extract STATION_ID [PARAMETER_CODE] INPUT OUTPUT [--no-convert]
+# All parameters for a station:
+python usgs_to_canadian.py extract STATION_ID INPUT OUTPUT [--no-convert]
+
+# Single parameter only:
+python usgs_to_canadian.py extract STATION_ID PARAMETER_CODE INPUT OUTPUT [--no-convert]
 ```
 
 | Argument | Description |
 |---|---|
-| `STATION_ID` | Station ID without USGS- prefix (e.g. `01046500`). |
-| `PARAMETER_CODE` | USGS parameter code (e.g. `00065`). Optional — if omitted, all parameters for the station are included. |
-| `INPUT` | Path to river file (e.g. `usgs_river.1600`). |
+| `STATION_ID` | Station ID without USGS- prefix (e.g. `02051500`). |
+| `PARAMETER_CODE` | USGS parameter code (e.g. `00065`). When provided, only that parameter is extracted. When omitted, all parameters for the station are included. |
+| `INPUT` | Path to river file (e.g. `usgs_river.2026040614`). |
 | `OUTPUT` | Output CSV file path. |
 | `--no-convert` | Skip unit conversion. |
 
@@ -118,13 +121,13 @@ python usgs_to_canadian.py INPUT [INPUT...] [-o OUTPUT] [--no-convert]
 ## Examples
 
 ```bash
+# Extract all parameters for a station into one file:
+python usgs_to_canadian.py extract 02051500 \
+    usgs_river.2026040614 02051500_hydrometric.csv
+
 # Extract one parameter from a river file:
 python usgs_to_canadian.py extract 01046500 00065 \
     usgs_river.1600 01046500_00065.csv
-
-# Extract all parameters for a station into one file:
-python usgs_to_canadian.py extract 01046500 \
-    usgs_river.1600 01046500_all.csv
 
 # Extract temperature (F->C conversion):
 python usgs_to_canadian.py extract 01046500 00011 \
