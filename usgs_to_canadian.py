@@ -429,11 +429,35 @@ def convert_file(
     return output_path
 
 
+def _resolve_extract_args(
+    positionals: List[str],
+) -> tuple:
+    """Resolve the positional arguments for extract.
+
+    Accepts either ``[PARAMETER_CODE] INPUT OUTPUT`` (2 or 3
+    values).  When 3 are given the first is the parameter code.
+    When 2 are given, parameter code is ``None`` (all params).
+
+    Returns ``(parameter_code, input_path, output_path)``.
+    """
+    if len(positionals) == 3:
+        return positionals[0], positionals[1], positionals[2]
+    elif len(positionals) == 2:
+        return None, positionals[0], positionals[1]
+    else:
+        raise SystemExit(
+            "extract requires 2 or 3 positional arguments "
+            "after STATION_ID: [PARAMETER_CODE] INPUT OUTPUT"
+        )
+
+
 def _cmd_extract(args: argparse.Namespace) -> None:
     """Handle the 'extract' subcommand."""
     convert_units = not args.no_convert
-    param = args.parameter_code  # may be None
-    all_features = parse_concatenated_geojson(args.input)
+    param, input_path, output_path = _resolve_extract_args(
+        args.positionals
+    )
+    all_features = parse_concatenated_geojson(input_path)
     matched = filter_features(
         all_features, args.station_id, param
     )
@@ -452,8 +476,8 @@ def _cmd_extract(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     result = convert_file(
-        input_path=args.input,
-        output_path=args.output,
+        input_path=input_path,
+        output_path=output_path,
         convert_units=convert_units,
         features=matched,
     )
@@ -618,21 +642,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ),
     )
     extract_p.add_argument(
-        "parameter_code",
-        nargs="?",
-        default=None,
+        "positionals",
+        nargs="+",
+        metavar="ARG",
         help=(
-            "USGS parameter code (e.g. 00065). If omitted, "
-            "all parameters for the station are extracted."
+            "[PARAMETER_CODE] INPUT OUTPUT.  If three "
+            "values are given, the first is a USGS "
+            "parameter code (e.g. 00065).  If two, all "
+            "parameters for the station are extracted."
         ),
-    )
-    extract_p.add_argument(
-        "input",
-        help="Path to concatenated river file.",
-    )
-    extract_p.add_argument(
-        "output",
-        help="Output CSV file path.",
     )
     extract_p.add_argument(
         "--no-convert",
