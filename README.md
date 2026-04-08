@@ -13,11 +13,14 @@ with properties including station ID, parameter code, value, units, and approval
 status. This script reads one or more of those JSON files and writes CSV files
 matching the Environment and Climate Change Canada (ECCC) hydrometric data format.
 
-Two modes of operation:
+Three modes of operation:
 
 - **`extract`** — Extract a single station from a concatenated river file
   (multiple FeatureCollections appended back-to-back). Optionally filter to a
   single parameter code, or extract all parameters into one file.
+- **`split`** — Split a concatenated river file into one CSV per station, each
+  containing all parameters. Output files are named
+  `<station_id>_hydrometric.csv`.
 - **`convert`** — Convert one or more single-station USGS JSON files (original
   behavior).
 
@@ -25,10 +28,8 @@ The conversion performs the following transformations on each record:
 
 1. **Station ID** — strips the "USGS-" prefix (e.g. "USGS-14105700" -> "14105700"). IDs are sanitized to prevent path traversal.
 2. **Timestamp** — converts to UTC and formats as ISO 8601 with "Z" suffix
-3. **Parameter** — maps USGS parameter codes to Canadian numeric codes:
-   - 00060 (Discharge) -> 47 (Débit)
-   - 00065 (Gage height) -> 46 (Niveau d'eau)
-   - Unmapped codes are passed through as-is.
+3. **Parameter** — USGS parameter codes are preserved as-is (e.g. 00060 for
+   Discharge, 00065 for Gage height).
 4. **Value** — converts to metric (by default):
    - 00060: ft³/s × 0.0283168466 = m³/s (rounded to whole numbers)
    - 00065: ft × 0.3048 = m (rounded to 3 decimal places)
@@ -77,6 +78,21 @@ python usgs_to_canadian.py extract STATION_ID [PARAMETER_CODE] INPUT OUTPUT [--n
 | `OUTPUT` | Output CSV file path. |
 | `--no-convert` | Skip unit conversion. |
 
+### `split` — batch split a river file into per-station CSVs
+
+Split a concatenated river file into one CSV per station, with all parameters
+included. Each output file is named `<station_id>_hydrometric.csv`.
+
+```
+python usgs_to_canadian.py split INPUT [-o OUTPUT_DIR] [--no-convert]
+```
+
+| Argument / Option | Description |
+|---|---|
+| `INPUT` | Path to concatenated river file (e.g. `usgs_river.1600`). |
+| `-o`, `--output-dir DIR` | Output directory for per-station CSV files. Created if it doesn't exist. Defaults to current directory. |
+| `--no-convert` | Skip unit conversion. |
+
 ### `convert` — single-station JSON files
 
 Convert one or more single-station USGS JSON files (original behavior).
@@ -113,6 +129,9 @@ python usgs_to_canadian.py extract 01046500 \
 # Extract temperature (F->C conversion):
 python usgs_to_canadian.py extract 01046500 00011 \
     usgs_river.1600 01046500_00011.csv
+
+# Split a river file into one CSV per station (all parameters):
+python usgs_to_canadian.py split usgs_river.1600 -o converted/
 
 # Convert a single file, auto-name output (writes 14105700_hydrometric.csv):
 python usgs_to_canadian.py convert 14105700.json

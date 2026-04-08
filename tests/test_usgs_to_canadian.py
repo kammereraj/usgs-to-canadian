@@ -196,7 +196,7 @@ class TestConvertFeature:
         row = convert_feature(
             SAMPLE_FEATURE["properties"]
         )
-        assert row["Parameter/Paramètre"] == 47
+        assert row["Parameter/Paramètre"] == "00060"
 
     def test_parameter_code_gage_height(self) -> None:
         props = {
@@ -204,7 +204,7 @@ class TestConvertFeature:
             "parameter_code": "00065",
         }
         row = convert_feature(props)
-        assert row["Parameter/Paramètre"] == 46
+        assert row["Parameter/Paramètre"] == "00065"
 
     def test_parameter_code_unmapped_passthrough(
         self,
@@ -1001,7 +1001,7 @@ class TestExtractEndToEnd:
 
         assert len(rows) == 2
         assert rows[0]["ID"] == "01046500"
-        assert rows[0]["Parameter/Paramètre"] == "46"
+        assert rows[0]["Parameter/Paramètre"] == "00065"
 
     def test_extract_no_match_exits(
         self, tmp_path: Path
@@ -1057,7 +1057,7 @@ class TestExtractEndToEnd:
         # 3 rows for station 01046500, excludes 99999999
         assert len(rows) == 3
         params = {r["Parameter/Paramètre"] for r in rows}
-        assert params == {"46", "47", "00010"}
+        assert params == {"00065", "00060", "00010"}
         assert all(
             r["ID"] == "01046500" for r in rows
         )
@@ -1104,6 +1104,212 @@ class TestExtractEndToEnd:
 # -------------------------------------------------------------------
 # CLI subcommands
 # -------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+# Split end-to-end
+# -------------------------------------------------------------------
+
+class TestSplitEndToEnd:
+    def test_split_creates_per_station_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Each station gets its own CSV file."""
+        fc = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "8.10",
+                "2026-03-21T12:30:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00060", "500",
+                "2026-03-21T12:30:00+00:00",
+            ),
+            _make_feature(
+                "USGS-99999999", "00065", "3.50",
+                "2026-03-21T12:30:00+00:00",
+            ),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        out_dir = str(tmp_path / "output")
+
+        main(["split", infile, "-o", out_dir])
+
+        f1 = os.path.join(
+            out_dir, "01046500_hydrometric.csv"
+        )
+        f2 = os.path.join(
+            out_dir, "99999999_hydrometric.csv"
+        )
+        assert os.path.exists(f1)
+        assert os.path.exists(f2)
+
+        with open(f1) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 2
+        assert all(
+            r["ID"] == "01046500" for r in rows
+        )
+        params = {r["Parameter/Paramètre"] for r in rows}
+        assert params == {"00065", "00060"}
+
+        with open(f2) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        assert rows[0]["ID"] == "99999999"
+
+    def test_split_default_output_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """Without -o, files go to current directory."""
+        fc = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "8.10",
+            ),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+
+        import os as _os
+        orig = _os.getcwd()
+        try:
+            _os.chdir(tmp_path)
+            main(["split", infile])
+        finally:
+            _os.chdir(orig)
+
+        assert os.path.exists(
+            tmp_path / "01046500_hydrometric.csv"
+        )
+
+    def test_split_multiple_collections(
+        self, tmp_path: Path
+    ) -> None:
+        """Stations across multiple FeatureCollections."""
+        fc1 = _make_geojson([
+            _make_feature(
+                "USGS-11111111", "00065", "5.0",
+                "2026-03-21T12:00:00+00:00",
+            ),
+        ])
+        fc2 = _make_geojson([
+            _make_feature(
+                "USGS-22222222", "00060", "100",
+                "2026-03-21T12:00:00+00:00",
+            ),
+        ])
+        fc3 = _make_geojson([
+            _make_feature(
+                "USGS-11111111", "00060", "200",
+                "2026-03-21T12:15:00+00:00",
+            ),
+        ])
+        infile = _write_concatenated(
+            tmp_path, [fc1, fc2, fc3]
+        )
+        out_dir = str(tmp_path / "out")
+
+        main(["split", infile, "-o", out_dir])
+
+        f1 = os.path.join(
+            out_dir, "11111111_hydrometric.csv"
+        )
+        f2 = os.path.join(
+            out_dir, "22222222_hydrometric.csv"
+        )
+        assert os.path.exists(f1)
+        assert os.path.exists(f2)
+
+        with open(f1) as f:
+            rows = list(csv.DictReader(f))
+        # Station 11111111 has features in fc1 and fc3
+        assert len(rows) == 2
+
+        with open(f2) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+
+    def test_split_no_convert(
+        self, tmp_path: Path
+    ) -> None:
+        """--no-convert keeps original units."""
+        fc = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "10.0",
+            ),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        out_dir = str(tmp_path / "out")
+
+        main(["split", infile, "-o", out_dir, "--no-convert"])
+
+        out_file = os.path.join(
+            out_dir, "01046500_hydrometric.csv"
+        )
+        with open(out_file) as f:
+            rows = list(csv.DictReader(f))
+        assert float(rows[0]["Value/Valeur"]) == 10.0
+
+    def test_split_empty_file_exits(
+        self, tmp_path: Path
+    ) -> None:
+        """Empty input exits with code 1."""
+        infile = str(tmp_path / "empty.json")
+        Path(infile).write_text("")
+        out_dir = str(tmp_path / "out")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["split", infile, "-o", out_dir])
+        assert exc_info.value.code == 1
+
+    def test_split_csv_header(
+        self, tmp_path: Path
+    ) -> None:
+        """Output CSVs have the standard header."""
+        fc = _make_geojson([
+            _make_feature("USGS-01046500", "00065"),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        out_dir = str(tmp_path / "out")
+
+        main(["split", infile, "-o", out_dir])
+
+        out_file = os.path.join(
+            out_dir, "01046500_hydrometric.csv"
+        )
+        with open(out_file) as f:
+            reader = csv.DictReader(f)
+            assert reader.fieldnames == CSV_HEADER
+
+    def test_split_output_sorted_by_date(
+        self, tmp_path: Path
+    ) -> None:
+        """Rows within each station file are sorted."""
+        fc = _make_geojson([
+            _make_feature(
+                "USGS-01046500", "00065", "8.10",
+                "2026-03-21T14:00:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00060", "500",
+                "2026-03-21T12:00:00+00:00",
+            ),
+            _make_feature(
+                "USGS-01046500", "00065", "8.05",
+                "2026-03-21T13:00:00+00:00",
+            ),
+        ])
+        infile = _write_concatenated(tmp_path, [fc])
+        out_dir = str(tmp_path / "out")
+
+        main(["split", infile, "-o", out_dir])
+
+        out_file = os.path.join(
+            out_dir, "01046500_hydrometric.csv"
+        )
+        with open(out_file) as f:
+            dates = [
+                r["Date"] for r in csv.DictReader(f)
+            ]
+        assert dates == sorted(dates)
+
 
 class TestCliSubcommands:
     def test_convert_subcommand(

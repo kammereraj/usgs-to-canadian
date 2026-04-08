@@ -18,13 +18,16 @@ parameter code, value, units, and approval status.  This script reads
 one or more of those JSON files and writes CSV files matching the
 Environment and Climate Change Canada (ECCC) hydrometric data format.
 
-Two modes of operation:
+Three modes of operation:
 
   extract  -- Extract a single station from a concatenated river
               file (multiple FeatureCollections appended
               back-to-back).  Optionally filter to a single
               parameter code, or extract all parameters into
               one file.
+  split    -- Split a concatenated river file into one CSV per
+              station, each containing all parameters.  Output
+              files are named ``<station_id>_hydrometric.csv``.
   convert  -- Convert one or more single-station USGS JSON files
               (original behavior).
 
@@ -34,11 +37,9 @@ The conversion performs the following transformations on each record:
                       (e.g. "USGS-14105700" -> "14105700")
   2. Timestamp     -- converts to UTC and formats as ISO 8601 with
                       "Z" suffix
-  3. Parameter     -- maps USGS parameter codes to Canadian numeric
-                      codes:
-                        00060 (Discharge)    -> 47 (Debit)
-                        00065 (Gage height)  -> 46 (Niveau d'eau)
-                      Unmapped codes are passed through as-is.
+  3. Parameter     -- USGS parameter codes are preserved as-is
+                      (e.g. 00060 for Discharge, 00065 for
+                      Gage height).
   4. Value         -- converts to metric (by default):
                         00060: ft^3/s * 0.0283168466 = m^3/s
                         00065: ft * 0.3048 = m
@@ -67,6 +68,13 @@ Subcommands
       write to a CSV file.  If PARAMETER_CODE is omitted, all
       parameters for the station are included in one file.
 
+  split INPUT [-o OUTPUT_DIR] [--no-convert]
+      Split a concatenated river file into one CSV per
+      station.  Each file contains all parameters for that
+      station and is named ``<station_id>_hydrometric.csv``.
+      If ``-o`` is given, files are written to that directory
+      (created if needed); otherwise the current directory.
+
   convert INPUT [INPUT...] [-o OUTPUT] [--no-convert]
       Convert one or more single-station USGS JSON files
       (original behavior).
@@ -93,6 +101,9 @@ Examples
   python usgs_to_canadian.py extract 01046500 \\
       usgs_river.1600 01046500_all.csv
 
+  # Split a river file into one CSV per station:
+  python usgs_to_canadian.py split usgs_river.1600 -o output/
+
   # Convert a single file, auto-name output:
   python usgs_to_canadian.py convert 14105700.json
 
@@ -107,12 +118,6 @@ import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
-
-# USGS parameter code -> Canadian parameter code
-PARAMETER_MAP: Dict[str, int] = {
-    "00060": 47,  # Discharge / Debit
-    "00065": 46,  # Water level / Niveau d'eau (gage height)
-}
 
 # Unit conversion factors: USGS imperial -> metric
 UNIT_CONVERSIONS: Dict[str, float] = {
@@ -333,11 +338,8 @@ def convert_feature(
         return None
     date_str = convert_timestamp(time_str)
 
-    # Parameter code mapping
+    # Parameter code
     usgs_param = props.get("parameter_code", "")
-    canadian_param = PARAMETER_MAP.get(
-        usgs_param, usgs_param
-    )
 
     # Value with optional unit conversion
     raw_value = props.get("value")
@@ -358,7 +360,7 @@ def convert_feature(
     return {
         "ID": station_id,
         "Date": date_str,
-        "Parameter/Paramètre": canadian_param,
+        "Parameter/Paramètre": usgs_param,
         "Value/Valeur": value,
         "Qualifier/Qualificatif": qualifier,
         "Symbol/Symbole": "",
@@ -457,6 +459,57 @@ def _cmd_extract(args: argparse.Namespace) -> None:
     )
     if result:
         print(f"Wrote {result}")
+
+
+def _cmd_split(args: argparse.Namespace) -> None:
+    """Handle the 'split' subcommand.
+
+    Reads a concatenated river file, discovers all unique
+    station IDs, and writes one CSV per station containing
+    all parameters.  Output files are named
+    ``<station_id>_hydrometric.csv`` in the output directory.
+    """
+    convert_units = not args.no_convert
+    all_features = parse_concatenated_geojson(args.input)
+
+    if not all_features:
+        print(
+            f"Warning: no features found in {args.input}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Discover unique station IDs (preserving order)
+    seen: Dict[str, bool] = {}
+    for feat in all_features:
+        props = feat.get("properties", {})
+        raw_sid = props.get(
+            "monitoring_location_id", ""
+        )
+        sid = _sanitize_station_id(raw_sid)
+        if sid not in seen:
+            seen[sid] = True
+    station_ids = list(seen.keys())
+
+    # Create output directory if needed
+    out_dir = args.output_dir or "."
+    if out_dir != "." and not os.path.isdir(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    for sid in station_ids:
+        matched = filter_features(all_features, sid)
+        out_path = os.path.join(
+            out_dir,
+            f"{sid}_hydrometric.csv",
+        )
+        result = convert_file(
+            input_path=args.input,
+            output_path=out_path,
+            convert_units=convert_units,
+            features=matched,
+        )
+        if result:
+            print(f"Wrote {result}")
 
 
 def _cmd_convert(args: argparse.Namespace) -> None:
@@ -587,6 +640,33 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Skip unit conversion.",
     )
 
+    # --- split subcommand ---
+    split_p = subparsers.add_parser(
+        "split",
+        help=(
+            "Split a concatenated river file into one "
+            "CSV per station (all parameters)."
+        ),
+    )
+    split_p.add_argument(
+        "input",
+        help="Path to concatenated river file.",
+    )
+    split_p.add_argument(
+        "-o", "--output-dir",
+        default=None,
+        dest="output_dir",
+        help=(
+            "Output directory for per-station CSV files. "
+            "Defaults to current directory."
+        ),
+    )
+    split_p.add_argument(
+        "--no-convert",
+        action="store_true",
+        help="Skip unit conversion.",
+    )
+
     # --- convert subcommand ---
     convert_p = subparsers.add_parser(
         "convert",
@@ -619,10 +699,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     effective = argv if argv is not None else sys.argv[1:]
 
     # Route to subcommand, help, or legacy fallback
-    if effective and effective[0] in ("extract", "convert"):
+    if effective and effective[0] in (
+        "extract", "split", "convert"
+    ):
         args = parser.parse_args(effective)
         if args.command == "extract":
             _cmd_extract(args)
+        elif args.command == "split":
+            _cmd_split(args)
         else:
             _cmd_convert(args)
     elif not effective or effective[0] in ("-h", "--help"):
